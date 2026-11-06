@@ -13,15 +13,27 @@ import os
 import time
 from typing import Any, Callable
 
+from openai import OpenAI
+from google import genai
+from google.genai import types
+
+import anthropic
+
+from dotenv import load_dotenv
+
+load_dotenv()
 # ---------------------------------------------------------------------------
 # Estimated costs per 1M INPUT & OUTPUT tokens (USD) as of March 2026
 # Vietnamese text generally consumes ~1.5x - 2.0x more tokens than English due to Unicode/diacritics.
 # ---------------------------------------------------------------------------
+
+#gemini 2.5 deprecated, need to switch to 3.5 flash lite
 PRICING_1M_TOKENS = {
     "gpt-4o": {"input": 5.00, "output": 20.00},
     "gpt-4o-mini": {"input": 0.150, "output": 0.600},
     "gemini-2.5-flash": {"input": 0.075, "output": 0.300},
     "gemini-2.5-pro": {"input": 1.25, "output": 5.00},
+    "gemini-3.5-flash-lite": {"input": 0.3, "output": 2.50},
     "claude-3-5-sonnet": {"input": 3.00, "output": 15.00},
     "claude-3-5-haiku": {"input": 0.80, "output": 4.00},
 }
@@ -29,10 +41,11 @@ PRICING_1M_TOKENS = {
 # Standard Model Identifiers
 OPENAI_MODEL = "gpt-4o"
 OPENAI_MINI_MODEL = "gpt-4o-mini"
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.5-flash-lite"
 ANTHROPIC_MODEL = "claude-3-5-haiku"
 
-
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 # ---------------------------------------------------------------------------
 # Task 1 — Call OpenAI (GPT-4o)
 # ---------------------------------------------------------------------------
@@ -63,11 +76,31 @@ def call_openai(
     Hint:
         from openai import OpenAI
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        # response.usage contains input_tokens and output_tokens (prompt_tokens/completion_tokens)
+        # response.usage contains iExceptionnput_tokens and output_tokens (prompt_tokens/completion_tokens)
     """
     # TODO: Import OpenAI, instantiate client, call chat.completions.create with parameters,
     #       measure execution start/end time, extract text and token usage, and return them.
-    raise NotImplementedError("Implement call_openai")
+    start = time.time()
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens
+        )
+
+        latency = time.time() - start
+        text = response.choices[0].message.content or ""
+        usage = {
+            "input_tokens": response.usage.prompt_tokens if response.usage else 0,
+            "output_tokens": response.usage.completion_tokens if response.usage else 0,
+        }
+        return text, latency, usage
+    except Exception as e:
+        print(f"Something went wrong with OpenAI: {e}")
+        return "Error", 0, 0
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +148,44 @@ def call_gemini(
     """
     # TODO: Initialize Gemini client, set config parameters, call generate_content,
     #       measure latency, extract response text and usage metadata, and return the tuple.
-    raise NotImplementedError("Implement call_gemini")
+
+    start = time.time()
+
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+
+        config = types.GenerateContentConfig(
+            temperature=temperature,
+            top_p=top_p,
+            max_output_tokens=max_tokens
+        )
+
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=config
+        )
+
+        latency = time.time() - start
+
+        text = response.text or ""
+
+        usage = {
+            "input_tokens": (
+                response.usage_metadata.prompt_token_count or 0
+                if response.usage_metadata else 0
+            ),
+            "output_tokens": (
+                response.usage_metadata.candidates_token_count or 0
+                if response.usage_metadata else 0
+            )
+        }
+
+        return text, latency, usage
+
+    except Exception as e:
+        print(f"Something went wrong with Gemini: {e}")
+        return "Error", 0, 0
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +222,29 @@ def call_anthropic(
     """
     # TODO: Initialize Anthropic client, create message, measure latency,
     #       extract content text and usage statistics, and return the tuple.
-    raise NotImplementedError("Implement call_anthropic")
+
+    start = time.time()
+    try:
+        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        response = client.message.create(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        latency = time.time() - start
+
+        text = response.content[0].text if response.content else ""
+        usage = {
+            "input_tokens": response.usage.input_tokens if response.usage else 0,
+            "output_tokens": response.usage.output_tokens if response.usage else 0,
+        }
+        return text, latency, usage
+    except Exception as e:
+        print(f"Something went wrong with Anthropic: {e}")
+        return "Error", 0, 0
 
 
 # ---------------------------------------------------------------------------
@@ -180,8 +272,49 @@ def compare_models(prompt: str) -> dict:
     # TODO: Calculate costs exactly based on input and output token counts using PRICING_1M_TOKENS
     #       Formula: Cost = (input_tokens * input_rate_per_1M + output_tokens * output_rate_per_1M) / 1,000,000
     # TODO: Assemble and return the comparison dictionary.
-    raise NotImplementedError("Implement compare_models")
-
+    gpt4o_text, gpt4o_lat, gpt4o_usage = call_openai(prompt, model=OPENAI_MODEL)
+    gpt4o_cost = (
+        gpt4o_usage["input_tokens"] * PRICING_1M_TOKENS["gpt-4o"]["input"] +
+        gpt4o_usage["output_tokens"] * PRICING_1M_TOKENS["gpt-4o"]["output"]
+    ) / 1_000_000
+    
+    # Call GPT-4o-mini
+    mini_text, mini_lat, mini_usage = call_openai(prompt, model=OPENAI_MINI_MODEL)
+    mini_cost = (
+        mini_usage["input_tokens"] * PRICING_1M_TOKENS["gpt-4o-mini"]["input"] +
+        mini_usage["output_tokens"] * PRICING_1M_TOKENS["gpt-4o-mini"]["output"]
+    ) / 1_000_000
+    
+    # Call Gemini 2.5 Flash
+    gemini_text, gemini_lat, gemini_usage = call_gemini(prompt, model=GEMINI_MODEL)
+    gemini_cost = (
+        gemini_usage["input_tokens"] * PRICING_1M_TOKENS["gemini-3.5-flash-lite"]["input"] +
+        gemini_usage["output_tokens"] * PRICING_1M_TOKENS["gemini-3.5-flash-lite"]["output"]
+    ) / 1_000_000
+    
+    return {
+        "gpt4o": {
+            "response": gpt4o_text,
+            "latency": gpt4o_lat,
+            "cost": gpt4o_cost,
+            "input_tokens": gpt4o_usage["input_tokens"],
+            "output_tokens": gpt4o_usage["output_tokens"]
+        },
+        "gpt4o_mini": {
+            "response": mini_text,
+            "latency": mini_lat,
+            "cost": mini_cost,
+            "input_tokens": mini_usage["input_tokens"],
+            "output_tokens": mini_usage["output_tokens"]
+        },
+        "gemini_flash": {
+            "response": gemini_text,
+            "latency": gemini_lat,
+            "cost": gemini_cost,
+            "input_tokens": gemini_usage["input_tokens"],
+            "output_tokens": gemini_usage["output_tokens"]
+        }
+    }
 
 # ---------------------------------------------------------------------------
 # Task 5 — Streaming chatbot with Gemini 2.5 (Focus Model)
@@ -200,6 +333,70 @@ def streaming_chatbot() -> None:
         - Check how to stream responses using client.chats or model.generate_content(..., stream=True).
         - Keep history limited to the last 3 turns to optimize context window and costs.
     """
+    print("\n\033[94m==============================================")
+    print("🤖 Vin Smart Future — Intelligent Chat Assistant")
+    print(f"Powered by Google {GEMINI_MODEL}")
+    print("Type 'quit' or 'exit' to end the session.")
+    print("==============================================\033[0m\n")
+
+    # Initialize Gemini client once
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
+    # Store history as a list of dictionaries with 'role' and 'text'
+    history = []
+
+    while True:
+        try:
+            user_input = input("\033[94mYou:\033[0m ").strip()
+            if not user_input:
+                continue
+            if user_input.lower() in ["quit", "exit"]:
+                print("\033[93mGoodbye!\033[0m")
+                break
+
+            # Compile messages from history (last 3 turns / 6 messages)
+            messages_to_send = []
+            for h in history[-6:]:
+                messages_to_send.append(h)
+            messages_to_send.append({"role": "user", "text": user_input})
+
+            print("\033[92mGemini:\033[0m ", end="", flush=True)
+
+            full_reply = ""
+
+            # Format messages for the new SDK
+            formatted_contents = []
+            for msg in messages_to_send:
+                formatted_contents.append(
+                    types.Content(
+                        role=msg["role"],
+                        parts=[types.Part.from_text(text=msg["text"])]
+                    )
+                )
+
+            response_stream = client.models.generate_content_stream(
+                model=GEMINI_MODEL,
+                contents=formatted_contents
+            )
+
+            for chunk in response_stream:
+                chunk_text = chunk.text or ""
+                print(chunk_text, end="", flush=True)
+                full_reply += chunk_text
+
+            print("\n")
+
+            # Record the turn in history
+            history.append({"role": "user", "text": user_input})
+            history.append({"role": "model", "text": full_reply})
+
+        except KeyboardInterrupt:
+            print("\n\033[93mSession interrupted. Goodbye!\033[0m")
+            break
+
+        except Exception as e:
+            print(f"\n\033[91m[Error Calling API]: {e}\033[0m\n")
+ 
     # TODO: Setup interactive session, prompt user for input, stream response, and update history.
     raise NotImplementedError("Implement streaming_chatbot")
 
@@ -228,7 +425,15 @@ def retry_with_backoff(
         The last exception raised by fn() after all retries are exhausted.
     """
     # TODO: implement retry loop with exponential backoff
-    raise NotImplementedError("Implement retry_with_backoff")
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except Exception:
+            if attempt == max_retries:
+                raise
+
+            delay = base_delay * (2 ** attempt)
+            time.sleep(delay)
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +451,16 @@ def batch_compare(prompts: list[str]) -> list[dict]:
         key "prompt" containing the original prompt string.
     """
     # TODO: iterate over prompts, call compare_models, and inject the original "prompt".
-    raise NotImplementedError("Implement batch_compare")
+    results = []
+
+    for prompt in prompts:
+        comparison = compare_models(prompt)
+
+        comparison["prompt"] = prompt
+
+        results.append(comparison)
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +478,35 @@ def format_comparison_table(results: list[dict]) -> str:
         | Prompt | Model | Response (truncated) | Latency | Tokens (In/Out) | Cost (USD) |
     """
     # TODO: Build and return the formatted table string. Truncate response to 50 chars for clean display.
-    raise NotImplementedError("Implement format_comparison_table")
+    table = [
+        "| Prompt | Model | Response (truncated) | Latency | Tokens (In/Out) | Cost (USD) |",
+        "|--------|-------|----------------------|---------|-----------------|------------|"
+    ]
+
+    for result in results:
+        prompt = result["prompt"].replace("|", "\\|").replace("\n", " ")
+
+        for model_name, stats in result.items():
+            if model_name == "prompt":
+                continue
+
+            response = stats["response"].replace("\n", " ").replace("|", "\\|")
+
+            if len(response) > 50:
+                response = response[:47] + "..."
+
+            latency = f"{stats['latency']:.2f}s"
+
+            tokens = f"{stats['input_tokens']}/{stats['output_tokens']}"
+
+            cost = f"${stats['cost']:.6f}"
+
+            table.append(
+                f"| {prompt} | {model_name} | {response} | "
+                f"{latency} | {tokens} | {cost} |"
+            )
+
+    return "\n".join(table)
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +527,7 @@ if __name__ == "__main__":
         print(f"Skipping live API comparison test: {e}")
         print("Set your API keys to run manual tests.")
 
-    print("\n=== Starting Gemini 2.5 Chatbot (type 'quit' to exit) ===")
+    print("\n=== Starting Gemini 3.5 Chatbot (type 'quit' to exit) ===")
     try:
         streaming_chatbot()
     except Exception as e:
